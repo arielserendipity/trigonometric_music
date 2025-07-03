@@ -1,0 +1,29 @@
+[
+    {
+        "timestamp": "2025-07-01 21:33:47",
+        "topic": "이차함수의 그래프와 그 성질",
+        "problem_index": 1,
+        "problem_title": "과제 1: 계수 a의 역할",
+        "student_answer": "",
+        "is_correct": false,
+        "attempt": 1,
+        "feedback_history": [
+            "답변을 입력해주세요."
+        ],
+        "interaction_data": {}
+    },
+    {
+        "timestamp": "2025-07-01 21:33:57",
+        "topic": "이차함수의 그래프와 그 성질",
+        "problem_index": 1,
+        "problem_title": "과제 1: 계수 a의 역할",
+        "student_answer": "dd",
+        "is_correct": false,
+        "attempt": 2,
+        "feedback_history": [
+            "답변을 입력해주세요.",
+            "학생의 답변이 주어진 학습 목표에 대한 이해를 보여주지 못했습니다. 이번 기회를 통해 다시 한번 핵심 개념을 탐색해보는 건 어떨까요? 예를 들어, 2차 함수 \\(y = ax^2 + bx + c\\)에서 계수 \\(a\\)가 그래프의 볼록 방향과 폭에 어떤 영향을 미치는지 생각해보세요. \\(a\\)의 값이 양수일 때와 음수일 때 그래프의 모양이 어떻게 달라지는지, 그리고 \\(a\\)의 절댓값이 커질수록 그래프의 폭이 어떻게 변하는지 관찰해볼 수 있을까요?"
+        ],
+        "interaction_data": {}
+    }
+]
