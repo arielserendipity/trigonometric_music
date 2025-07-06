@@ -30,12 +30,9 @@ def get_openai_client():
         st.error(f"OpenAI 클라이언트 생성 중 오류 발생: {e}")
         st.stop()
 
-# [개선] gspread 인증 함수 (기존 로직은 훌륭하며 그대로 유지)
 @st.cache_resource
 def get_gspread_client():
-    """st.secrets에서 인증 정보를 읽어 gspread 클라이언트 객체를 생성하고 캐싱합니다."""
     try:
-        # secrets.toml 파일의 [google_sheets_auth] 섹션 사용
         creds = Credentials.from_service_account_info(
             st.secrets["google_sheets_auth"],
             scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -48,12 +45,11 @@ def get_gspread_client():
         st.error(f"Google Sheets 인증에 실패했습니다: {e}")
         st.stop()
 
-# 클라이언트 초기화
 client = get_openai_client()
 gc = get_gspread_client()
 
 # --- 2. 과제 및 프레임워크 데이터 정의 (수정 없음) ---
-# (이하 TASK_INFO, QUESTIONS, QUESTION_ORDER, SCORING_RUBRIC, PROMPT_TEMPLATE는 원본과 동일)
+# (TASK_INFO, QUESTIONS 등은 원본과 동일)
 TASK_INFO = {
     "TITLE": "나만의 '시그니처 사운드' 만들기",
     "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
@@ -126,37 +122,39 @@ CONFIG = {
     "TEACHER_PASSWORD": "2025",
     "AI_MODEL": "gpt-4-turbo",
     "MIN_ANSWER_LENGTH": 10,
-    "GSHEET_NAME": "trigonometric music" # [개선] 시트 이름에 공백이 있을 경우 문제가 될 수 있어 공백 제거
+    "GSHEET_NAME": "trigonometric music"
 }
 
 def initialize_session():
-    # [개선] 페이지 전환 시 의도치 않은 초기화를 막기 위해 clear() 대신 각 키를 명시적으로 초기화
-    if 'page' not in st.session_state or st.session_state.page == 'main':
-        st.session_state.page = 'main'
-        st.session_state.student_name = ""
-        st.session_state.teacher_logged_in = False
-        st.session_state.current_q_idx = 0
-        st.session_state.answers = {key: "" for key in QUESTION_ORDER}
-        st.session_state.feedbacks = {key: {} for key in QUESTION_ORDER}
-        st.session_state.attempts = {key: 0 for key in QUESTION_ORDER}
-        st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
+    # session_state 자체를 초기화하는 대신, 페이지 관련 키들만 초기화
+    st.session_state.page = 'main'
+    st.session_state.student_name = ""
+    st.session_state.teacher_logged_in = False
+    st.session_state.current_q_idx = 0
+    st.session_state.answers = {key: "" for key in QUESTION_ORDER}
+    st.session_state.feedbacks = {key: {} for key in QUESTION_ORDER}
+    st.session_state.attempts = {key: 0 for key in QUESTION_ORDER}
+    st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
+
+# [수정] 다시 시작 로직을 initialize_session()과 분리하여 명확하게 만듦
+def reset_for_new_student(name):
+    """새로운 학생 이름으로 시작할 때 모든 진행 상황을 초기화합니다."""
+    initialize_session()
+    st.session_state.student_name = name
+    st.session_state.page = 'student_learning'
 
 def save_to_gsheet(gspread_client, student_name, question_id, attempt, is_final, question_text, answer, feedback):
     try:
         sh = gspread_client.open(CONFIG["GSHEET_NAME"])
-        # 학생 이름으로 시트 생성 시, gspread가 처리할 수 있는 안전한 이름으로 변경
         safe_name = "".join(c for c in student_name if c.isalnum() or c in " _-")
-        
         try:
             worksheet = sh.worksheet(safe_name)
         except gspread.WorksheetNotFound:
             worksheet = sh.add_worksheet(title=safe_name, rows="1000", cols="10")
-            # 시트 생성 시 헤더 추가
             worksheet.append_row([
                 "Timestamp", "Question ID", "Attempt", "Is Final", "Question Text",
                 "Student Answer", "Scores", "Total Score", "Analysis", "Suggestion"
             ], value_input_option='USER_ENTERED')
-
         scores_str = json.dumps(feedback.get("scores", {}), ensure_ascii=False)
         worksheet.append_row([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -168,17 +166,11 @@ def save_to_gsheet(gspread_client, student_name, question_id, attempt, is_final,
 
 def get_ai_feedback(client, q_key, student_answer):
     if len(student_answer.strip()) < CONFIG['MIN_ANSWER_LENGTH']:
-        # [개선] 오류 메시지도 JSON 형식으로 통일하여 처리 로직을 일관성 있게 만듦
-        return json.dumps({
-            "error": f"답변이 너무 짧아요. 자신의 생각을 조금 더 자세히 ({CONFIG['MIN_ANSWER_LENGTH']}자 이상) 설명해주시면 더 좋은 도움을 드릴 수 있어요!"
-        })
-
+        return json.dumps({ "error": f"답변이 너무 짧아요. 자신의 생각을 조금 더 자세히 ({CONFIG['MIN_ANSWER_LENGTH']}자 이상) 설명해주세요!" })
     q_info = QUESTIONS[q_key]
     dimension = q_info["dimension"]
-    # [개선] 루브릭 키를 더 안정적으로 찾기 위한 로직
     criteria_key = next((key for key in SCORING_RUBRIC.get(dimension, {}) if key.startswith(q_key)), q_key)
     criteria_text = SCORING_RUBRIC.get(dimension, {}).get(criteria_key, "채점 기준을 찾을 수 없습니다.")
-
     prompt = PROMPT_TEMPLATE.format(
         dimension=dimension,
         question_text=q_info['text'],
@@ -194,19 +186,23 @@ def get_ai_feedback(client, q_key, student_answer):
         )
         return response.choices[0].message.content
     except Exception as e:
-        # [개선] AI 오류 메시지도 JSON 형식으로 통일
         return json.dumps({"error": f"AI 서버에 문제가 발생했어요. 잠시 후 다시 시도해주세요: {e}"})
 
 # --- 4. UI 페이지 렌더링 함수들 ---
-# (이하 main_page, student_login_page, student_learning_page, completion_page 등 UI 함수들은 구조가 좋으므로 큰 수정 없음)
-# (단, teacher_dashboard_page에서 비효율적인 부분 수정)
 
+# [수정] main_page 레이아웃 변경
 def main_page():
     st.title("🚀 AI와 함께 탐구하는 수학과 음악")
-    st.image("https://images.unsplash.com/photo-1511379938547-c1f69419868d?q=80&w=2070&auto=format&fit=crop", caption="나만의 시그니처 사운드를 디자인해봅시다!")
     
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2 = st.columns([1, 1], gap="large")
+
+    with col1:
+        st.image("https://images.unsplash.com/photo-1511379938547-c1f69419868d?q=80&w=1200&auto=format&fit=crop", 
+                 caption="나만의 시그니처 사운드를 디자인해봅시다!")
+
     with col2:
+        st.markdown("<br><br>", unsafe_allow_html=True) # 수직 정렬을 위한 공백
+        st.markdown("### 시작할 역할을 선택하세요:")
         if st.button("👨‍🎓 학생으로 시작하기", use_container_width=True, type="primary"):
             st.session_state.page = 'student_login'
             st.rerun()
@@ -220,11 +216,10 @@ def student_login_page():
     
     if st.button("탐구 시작하기", type="primary"):
         if name:
-            # 학생이 새로 로그인할 때만 세션 초기화
             if st.session_state.get('student_name') != name:
-                initialize_session() 
-            st.session_state.student_name = name
-            st.session_state.page = 'student_learning'
+                reset_for_new_student(name) # 새 학생일 때만 리셋 함수 호출
+            else: # 같은 이름이면 학습 페이지로 이동만 함
+                st.session_state.page = 'student_learning'
             st.rerun()
         else:
             st.warning("이름을 입력해야 탐구를 시작할 수 있어요.")
@@ -256,10 +251,11 @@ def student_learning_page():
                     st.rerun()
         
         st.markdown("---")
-        if st.button("탐구 처음부터 다시하기", use_container_width=True, key="restart_from_learning"):
-            st.session_state.page = 'student_login'
-            # [개선] 초기화는 student_login 페이지에서 처리하도록 유도
-            st.warning("이름을 다시 입력하고 시작하면 모든 기록이 초기화됩니다.")
+        # [수정] 다시 시작하기 버튼 로직 개선
+        if st.button("탐구 처음부터 다시하기", use_container_width=True, type="secondary", key="restart_from_learning_final"):
+            # 경고 메시지 없이 바로 초기화 후 로그인 페이지로 이동
+            initialize_session()
+            st.success("모든 탐구 내용이 초기화되었습니다. 메인 페이지로 돌아갑니다.")
             st.rerun()
 
     st.title(f"🎵 {TASK_INFO['TITLE']}")
@@ -313,7 +309,6 @@ def student_learning_page():
                     st.markdown("---")
                     st.info(f"**분석:** {feedback.get('analysis', '')}")
                     st.warning(f"**생각해볼 점:** {feedback.get('suggestion', '')}")
-
                 if not is_finalized:
                     if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
                         st.session_state.is_finalized[q_key] = True
@@ -346,7 +341,6 @@ def completion_page():
         
         if st.session_state.is_finalized.get(q_key, False):
             feedback = st.session_state.feedbacks.get(q_key, {})
-            # [개선] 점수가 문자열일 경우를 대비해 int로 변환
             report_data[dim]['score'] += int(feedback.get("total_score", 0))
             report_data[dim]['max_score'] += q_info.get("max_score", 0)
             
@@ -369,7 +363,7 @@ def completion_page():
                     st.json(feedback)
 
     if st.button("다른 이름으로 새로 시작하기", use_container_width=True):
-        st.session_state.page = 'student_login'
+        initialize_session() # 메인 페이지로 돌아가므로 initialize_session 호출
         st.rerun()
 
 def teacher_login_page():
@@ -393,31 +387,27 @@ def teacher_dashboard_page():
     st.title("📊 교사용 대시보드")
     
     try:
-        # [개선] gc.open() 호출을 한 번으로 줄여 효율성 증대
         sh = gc.open(CONFIG["GSHEET_NAME"])
-        student_names = sorted([w.title for w in sh.worksheets() if w.title != 'Sheet1']) # 기본 시트는 제외
+        student_names = sorted([w.title for w in sh.worksheets() if w.title != 'Sheet1'])
     except Exception as e:
         st.error(f"학생 목록을 불러오는 중 오류 발생: {e}")
         student_names = []
-        sh = None # 오류 발생 시 sh 객체 초기화
+        sh = None
 
     if not student_names:
         st.info("아직 제출된 학생 데이터가 없습니다.")
-    elif sh: # sh 객체가 정상적으로 생성되었을 때만 실행
+    elif sh:
         selected_name = st.selectbox("학생 선택:", student_names, key="teacher_student_select")
-        
         if selected_name:
             try:
                 worksheet = sh.worksheet(selected_name)
                 data = worksheet.get_all_records()
-                
                 if data:
                     df = pd.DataFrame(data)
                     st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
                     st.dataframe(df)
                 else:
                     st.info(f"{selected_name} 학생의 데이터가 비어있습니다.")
-
             except Exception as e:
                 st.error(f"{selected_name} 학생의 데이터를 불러오는 중 오류가 발생했습니다: {e}")
                 
@@ -439,12 +429,8 @@ page_map = {
     'teacher_dashboard': teacher_dashboard_page,
 }
 
-# [수정] 교사 로그아웃 시 로그인 페이지로 리디렉션하는 로직 수정
 if st.session_state.page == 'teacher_dashboard' and not st.session_state.get('teacher_logged_in', False):
     st.session_state.page = 'teacher_login'
-# [수정] 마지막 라인의 'ㄴ' 오타 제거
-# st.session_state.page = 'teacher_login'ㄴ <- 이 부분의 'ㄴ'을 삭제했습니다.
 
-# 현재 페이지에 맞는 함수 실행
 page_function = page_map.get(st.session_state.page, main_page)
 page_function()
