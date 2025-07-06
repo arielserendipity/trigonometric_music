@@ -1,472 +1,405 @@
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
-import os
 import json
 from datetime import datetime
+import gspread # conn.client를 통해 얻은 객체를 사용하기 위해 여전히 필요합니다.
+# [최종 수정] 불필요하고 충돌을 일으키는 Credentials import를 완전히 삭제했습니다.
 
-# --- 1. 설정 및 CSS 주입 ---
-CONFIG = {
-    "TEACHER_PASSWORD": "teacher1234",
-    "STUDENT_DATA_DIR": "student_data",
-    "AI_MODEL": "gpt-4-turbo",
-    "MIN_ANSWER_LENGTH": 10
-}
+# --- 1. 기본 설정 및 환경 구성 ---
+st.set_page_config(layout="wide", page_title="수학과 음악 연결 탐구")
 
-# 페이지 넓게 사용 설정
-st.set_page_config(layout="wide")
-
-import gspread
-
-gsheet_secret = st.secrets["connections"]["gsheets"]
-gc = gspread.service_account_from_dict({
-    "type": "service_account",
-    "project_id": gsheet_secret["project_id"],
-    "private_key_id": gsheet_secret["private_key_id"],
-    "private_key": gsheet_secret["private_key"],
-    "client_email": gsheet_secret["client_email"],
-    "client_id": gsheet_secret["client_id"],
-    "auth_uri": gsheet_secret["auth_uri"],
-    "token_uri": gsheet_secret["token_uri"],
-    "auth_provider_x509_cert_url": gsheet_secret["auth_provider_x509_cert_url"],
-    "client_x509_cert_url": gsheet_secret["client_x509_cert_url"],
-    "universe_domain": gsheet_secret["universe_domain"],
-})
-
-sh = gc.open("수학과 음악")
-
-# 가로 폭을 최대로 늘리기 위한 CSS 주입 함수
-def widen_space():
+def apply_custom_css():
     st.markdown("""
         <style>
-            .block-container {
-                padding-top: 2rem;
-                padding-bottom: 2rem;
-                padding-left: 3rem;
-                padding-right: 3rem;
-            }
+            .block-container { padding-top: 2rem; padding-bottom: 2rem; padding-left: 3rem; padding-right: 3rem; }
+            .stButton>button { border-radius: 8px; font-weight: bold; }
+            h1, h2, h3 { font-family: 'Nanum Gothic', sans-serif; }
         </style>
     """, unsafe_allow_html=True)
 
-# --- OpenAI 클라이언트 초기화 ---
-try:
-    client = OpenAI(api_key=st.secrets["openai_api_key"])
-except Exception:
-    st.error("OpenAI API 키를 설정해주세요. .streamlit/secrets.toml 파일에 키가 필요합니다.")
-    st.stop()
+# --- 외부 서비스 인증 ---
+@st.cache_resource
+def get_openai_client():
+    try:
+        return OpenAI(api_key=st.secrets["openai_api_key"])
+    except Exception:
+        st.error("OpenAI API 키 설정에 문제가 있습니다. .streamlit/secrets.toml 파일을 확인해주세요.")
+        st.stop()
 
-# --- 2. 과제 및 루브릭 데이터 ---
+# [최종 수정] 연결 함수를 단 하나로 통합했습니다.
+# 이 함수 하나로 읽기와 쓰기 모두를 처리할 수 있습니다.
+@st.cache_resource
+def get_gsheet_connection():
+    try:
+        # 이 함수는 secrets.toml의 [connections.gsheets] 설정을 자동으로 읽어옵니다.
+        # type 필드가 없으면 st-gsheets-connection 라이브러리가 올바르게 처리합니다.
+        return st.connection("gsheets")
+    except Exception as e:
+        st.error(f"Google Sheets 연결에 실패했습니다: {e}")
+        st.stop()
 
-GEOGEBRA_LINKS = {
-    1: "https://www.geogebra.org/classic/ejrczex3",
-    2: "https://www.geogebra.org/classic/wmzfHwWE",
-    3: "https://www.geogebra.org/classic/qjvzuef2"
+# 클라이언트 초기화
+client = get_openai_client()
+conn = get_gsheet_connection() # conn 객체 하나만 사용합니다.
+
+# --- 2. 과제 및 프레임워크 데이터 정의 (이하 수정 없음) ---
+# ... (이전과 동일한 내용) ...
+TASK_INFO = {
+    "TITLE": "나만의 '시그니처 사운드' 만들기",
+    "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
+    "GOAL": """
+        **<사운드 디자인 목표>**
+        1. 기본음 '도(C4)'보다 **더 높은** 소리
+        2. 갑자기 시작하지 않고 **부드럽게** 시작하는 느낌
+        3. 너무 크지 않은 **적당한** 볼륨
+    """,
+    "GEOGEBRA_LINK": "https://www.geogebra.org/classic/ejrczex3"
 }
 
 QUESTIONS = {
-    1: {
-        "title": "Step 1. 목표 분석 및 개념 연결",
-        "evaluation_dimension": "구조적 동치 (Structural Equivalence)",
-        "sub_questions": {
-            1: "목표 소리인 '더 조용한 소리'는 삼각함수의 어떤 변수와 관련이 있으며, 그 값을 어떻게 조절해야 할까요?",
-            2: "'한 옥타브 높은 소리(약 784Hz)'는 어떤 변수와 관련이 있으며, 그 값은 대략 얼마가 되어야 할까요?",
-            3: "'부드럽게 시작하는 소리'는 파동의 시작점과 관련이 있습니다. 이는 어떤 변수를 조절하여 표현할 수 있을까요?"
-        }
+    "1-1": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "목표 소리의 세 가지 특징('높이', '시작 느낌', '볼륨')은 각각 수학식의 어떤 문자(A, B, C, D)와 가장 관련이 깊을까요? 아래 표에 짝지어 보세요.", "dimension": "표상적 연결", "max_score": 1},
+    "1-2": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "위 분석을 바탕으로, 여러분이 디자인한 최종 시그니처 사운드를 나타내는 함수식을 완성하고, GeoGebra로 만든 그래프를 캡처하여 첨부해주세요.", "dimension": "표상적 연결", "max_score": 1},
+    "1-3": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "여러분이 만든 식에서 문자 B의 값은 현실 세계의 '소리'에서 구체적으로 무엇을 의미할까요?", "dimension": "표상적 연결", "max_score": 1},
+    "2-1": {"step": 2, "title": "Step 2. 나만의 사운드 만들기", "text": "'적당한 볼륨'을 만들기 위해 문자 A의 값을 어떻게 정했나요? 어떤 생각이나 계산 과정을 거쳤는지 알려주세요.", "dimension": "절차적 모델링", "max_score": 2},
+    "2-2": {"step": 2, "title": "Step 2. 나만의 사운드 만들기", "text": "만약 여러분이 만든 모델에서 문자 D의 값을 1만큼 더 크게 바꾼다면, 소리는 어떻게 달라질까요? 그래프의 모양 변화와 관련지어 그 이유를 설명해주세요.", "dimension": "함의적 관계 추론", "max_score": 2},
+    "3-1": {"step": 3, "title": "Step 3. 디자인 분석 및 나의 생각", "text": "소리의 '크기'를 조절하는 문자 A와 '높낮이'를 조절하는 문자 B는 서로에게 영향을 주나요? 이 문자들의 관계를 통해, 이 수학 모델이 어떻게 하나의 '사운드 시스템'으로 작동하는지 설명해보세요.", "dimension": "시스템 해석", "max_score": 2},
+    "3-2": {"step": 3, "title": "Step 3. 디자인 분석 및 나의 생각", "text": "이번 '사운드 디자인' 활동을 통해 수학에 대한 여러분의 생각이나 느낌에 어떤 변화가 있었는지 자유롭게 서술해주세요.", "dimension": "성찰적 연결", "max_score": 2}
+}
+QUESTION_ORDER = list(QUESTIONS.keys())
+
+SCORING_RUBRIC = {
+    "표상적 연결": {
+        "1-1": "현실-수학 대응: 현실 특성(높이, 시작, 볼륨)과 수학 파라미터(B, C, A)를 올바르게 짝지었는가? (1점)",
+        "1-2": "수학적 모델 구축: 목표에 부합하는 타당한 함수식과 그래프를 제시했는가? (1점)",
+        "1-3": "수학-현실 해석: 수학적 파라미터(B)의 값을 현실 세계의 물리적 의미(주파수, 진동수)와 연결하여 설명했는가? (1점)"
     },
-    2: {
-        "title": "Step 2. 수학적 모델링 및 관계 설명",
-        "evaluation_dimension": "절차적 모델링 (Procedural Modeling) & 관계 추론 (Relational Reasoning)",
-        "sub_questions": {
-            1: "위 분석을 바탕으로, 목표 소리를 나타내는 최종 삼각함수 식을 작성해 보세요. (화면 캡처는 생략하고 식만 작성)",
-            2: "작성한 식의 각 변수 값이 왜 그렇게 설정되었는지, 그 수학적 조작이 어떤 음악적 결과를 가져오는지 관계 측면에서 구체적인 이유를 설명하세요."
-        }
+    "절차적 모델링": {
+        "2-1": "전략적 절차 선택(1점) 및 정확한 수행(1점): 목표('적당한 볼륨')를 달성하기 위해 A값을 결정하는 합리적인 전략을 제시하고, 그 과정을 정확하게 수행하였는가?"
     },
-    3: {
-        "title": "Step 3. 종합 및 성찰",
-        "evaluation_dimension": "통합적 해석 (Interpretive Synthesis) & 메타인지 성찰 (Metacognitive Reflection)",
-        "sub_questions": {
-            1: "조절한 여러 변수들은 독립적인가요, 아니면 서로 영향을 주나요? 이 요소들이 어떻게 하나의 '소리'라는 시스템을 완성하는지 설명해 보세요.",
-            2: "수학과 음악을 연결하는 이번 활동을 통해 수학의 어떤 새로운 점(가치, 유용성, 재미 등)을 발견하게 되었는지 자신의 경험을 바탕으로 자유롭게 서술하세요."
-        }
+    "함의적 관계 추론": {
+        "2-2": "결과 예측(1점) 및 논리적 근거 제시(1점): D값의 변화가 소리에 미치는 영향을 타당하게 예측하고, 그 이유를 그래프의 수직이동과 진폭/주기의 불변성과 연결하여 논리적으로 설명했는가?"
+    },
+    "시스템 해석": {
+        "3-1": "요소 역할 분석(1점) 및 상호작용 설명(1점): 각 파라미터가 소리의 다른 속성을 '독립적으로' 제어함을 인식하고, 이 독립성 덕분에 전체가 하나의 정교한 시스템으로 작동함을 설명했는가?"
+    },
+    "성찰적 연결": {
+        "3-2": "가치/유용성 인식(1점) 및 태도 변화 성찰(1점): 수학의 창의적/도구적 가치를 구체적으로 발견하고, 이 경험으로 인한 자신의 수학에 대한 인식이나 태도의 긍정적 변화를 서술하였는가?"
     }
 }
 
-RUBRIC_PROMPT_TEMPLATE = """
-당신은 고등학생의 '수학 외적 연결 역량' 함양을 돕는 친절한 AI 학습 도우미입니다. 학생이 주어진 과제에 대한 답변을 제출하면, 아래의 상세한 루브릭에 근거하여 학생의 생각을 긍정적으로 분석하고, 더 깊이 탐구할 수 있도록 구체적인 도움을 주어야 합니다.
+PROMPT_TEMPLATE = """
+당신은 고등학생의 '수학 외적 연결 역량' 함양을 돕는 친절하고 전문적인 AI 학습 코치입니다. 학생이 주어진 과제에 대한 답변을 제출하면, 아래의 **[채점 기준]**에 따라 **각 평가 요소별로 배점**하고, 이를 합산하여 총점을 계산합니다. 분석과 제안은 학생의 눈높이에 맞춰 긍정적이고 구체적으로 작성해주세요.
 
-**[평가 루브릭: 수학 외적 연결 역량]**
-{rubric_details}
+**[평가 차원]: {dimension}**
+**[현재 질문]:** "{question_text}"
+**[채점 기준]:**
+{scoring_criteria}
 
-**[도움 제공 지침]**
-- 현재 질문은 **'{evaluation_dimension}'** 역량과 관련이 깊습니다. 이 역량의 루브릭을 중점적으로 참고하여 도움을 주세요.
-- 학생의 답변: "{student_answer}"
-- 학생에게 제공할 도움말을 아래의 JSON 형식에 맞춰 **반드시 JSON 객체로만** 출력하세요. 다른 설명은 절대 추가하지 마세요.
+**[학생 답변]:** "{student_answer}"
+
+**[출력 형식]**
+아래 JSON 형식에 맞춰 **반드시 JSON 객체로만** 출력하세요. 다른 설명은 절대 추가하지 마세요.
 
 {{
-  "understanding_level": "(0에서 3 사이의 정수, 현재 이해도 수준)",
-  "analysis": "(학생 답변의 좋은 점과 현재 이해도 수준에 대한 분석을 루브릭 기준에 근거하여 긍정적으로 서술)",
-  "suggestion": "(더 높은 수준의 이해로 나아가기 위해 생각해볼 만한 질문이나 탐구 방향을 구체적으로 제시)"
+  "scores": {{
+    "평가요소1 이름": "(0점 또는 1점 등, 요소별 배점)",
+    "평가요소2 이름": "(요소별 배점)"
+  }},
+  "total_score": "(획득한 총점)",
+  "analysis": "(학생 답변의 잘한 점과 각 평가 요소별 점수 부여 근거를 루브릭에 기반하여 긍정적으로, 구체적으로 서술)",
+  "suggestion": "(더 높은 점수를 받기 위해 보완할 점이나, '만약 ~라면 어떨까?'와 같이 더 깊이 생각해볼 만한 질문을 구체적으로 제시)"
 }}
 """
-
-RUBRIC_DETAILS = """
-1.  **구조적 동치:** 수학 개념과 음악 개념의 구조적 유사성 파악 능력.
-    - 3점: 관계의 근본 원리 설명 / 2점: 구체적 관계 서술 / 1점: 피상적 관련성 인식 / 0점: 오류
-2.  **절차적 모델링:** 목표 달성을 위해 수학적 절차를 사용하는 능력.
-    - 3점: 최적의 절차 선택 및 이유 설명 / 2점: 정확한 모델 구성 / 1점: 시행착오 반복 / 0점: 실패
-3.  **관계 추론:** 수학적 조작과 음악적 결과의 관계를 논리적으로 설명하는 능력.
-    - 3점: 일반적 규칙/패턴 도출 / 2점: 결과와 단순 이유 설명 / 1점: 결과만 서술 / 0점: 오류
-4.  **통합적 해석:** 개별 요소들이 모여 시스템을 이루는 방식을 종합적으로 설명하는 능력.
-    - 3점: 모델 일반화 및 전체 범위 설명 / 2점: 각 요소의 독립적 역할 구분 / 1점: 단순 나열 / 0점: 실패
-5.  **메타인지 성찰:** 연결 경험을 통한 수학의 가치나 태도 변화를 표현하는 능력.
-    - 3점: 인식 변화의 구체적 서술 및 확장 의지 / 2점: 새로운 가치/유용성 인식 / 1점: 단순 소감 / 0점: 성찰 없음
-"""
-
 # --- 3. 세션 상태 및 헬퍼 함수 ---
-def initialize_session_state():
-    if 'page' not in st.session_state: st.session_state.page = 'main'
-    if 'student_name' not in st.session_state: st.session_state.student_name = ""
-    if 'teacher_logged_in' not in st.session_state: st.session_state.teacher_logged_in = False
-    if 'current_step' not in st.session_state: st.session_state.current_step = 1
-    if 'current_sub_question_idx' not in st.session_state: st.session_state.current_sub_question_idx = 1
-    if 'answers' not in st.session_state: st.session_state.answers = {}
-    if 'feedbacks' not in st.session_state: st.session_state.feedbacks = {}
-    if 'attempts' not in st.session_state: st.session_state.attempts = {}
-    if 'is_finalized' not in st.session_state: st.session_state.is_finalized = {}
+CONFIG = {
+    "TEACHER_PASSWORD": "2025",
+    "AI_MODEL": "gpt-4-turbo",
+    "MIN_ANSWER_LENGTH": 10,
+    "GSHEET_NAME": "trigonometric music"
+}
 
-def reset_student_session():
+def initialize_session():
     st.session_state.clear()
-    initialize_session_state()
+    st.session_state.page = 'main'
+    st.session_state.student_name = ""
+    st.session_state.teacher_logged_in = False
+    st.session_state.current_q_idx = 0
+    st.session_state.answers = {key: "" for key in QUESTION_ORDER}
+    st.session_state.feedbacks = {key: {} for key in QUESTION_ORDER}
+    st.session_state.attempts = {key: 0 for key in QUESTION_ORDER}
+    st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
 
-def save_student_data(student_name, step, sub_idx, attempt, is_final, question, answer, feedback):
-    data_dir = CONFIG['STUDENT_DATA_DIR']
-    if not os.path.exists(data_dir): os.makedirs(data_dir)
-    safe_name = "".join(c for c in student_name if c.isalnum())
-    # filename = os.path.join(data_dir, f"{safe_name}.json")
-    
-    entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "question_id": f"{step}-{sub_idx}", "attempt": attempt, "is_final": is_final,
-        "question_text": question, "student_answer": answer, "ai_feedback_understanding_level": feedback["understanding_level"],
-        "ai_feedback_analysis": feedback["analysis"], "ai_feedback_suggestion": feedback["suggestion"]
-    }
-    # try:
-    #     with open(filename, "r", encoding="utf-8") as f: data = json.load(f)
-    # except (FileNotFoundError, json.JSONDecodeError): data = []
-    # data.append(entry)
-    # with open(filename, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
+# [최종 수정] 함수가 connection 객체를 직접 받아서, 내부의 .client를 사용합니다.
+def save_to_gsheet(connection, student_name, question_id, attempt, is_final, question_text, answer, feedback):
+    try:
+        # conn 객체에서 gspread 클라이언트를 바로 꺼내 씁니다.
+        gspread_client = connection.client
+        sh = gspread_client.open(CONFIG["GSHEET_NAME"])
+        safe_name = "".join(c for c in student_name if c.isalnum())
+        try:
+            worksheet = sh.worksheet(safe_name)
+        except gspread.WorksheetNotFound:
+            worksheet = sh.add_worksheet(title=safe_name, rows="1000", cols="10")
+            worksheet.append_row([
+                "Timestamp", "Question ID", "Attempt", "Is Final", "Question Text",
+                "Student Answer", "Scores", "Total Score", "Analysis", "Suggestion"
+            ])
 
-    if student_name not in [t.title for t in sh.worksheets()]:
-        sh.add_worksheet(title=safe_name, rows="2000", cols="50")
-        worksheet = sh.worksheet(safe_name)
+        scores_str = json.dumps(feedback.get("scores", {}), ensure_ascii=False)
         worksheet.append_row([
-            "Timestamp", "Question ID", "Attempt", "Is Final",
-            "Question Text", "Student Answer",
-            "AI Feedback Understanding Level", "AI Feedback Analysis", "AI Feedback Suggestion"
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            question_id, attempt, is_final, question_text, answer,
+            scores_str, feedback.get("total_score", 0), feedback.get("analysis", ""), feedback.get("suggestion", "")
         ])
-    
-    worksheet = sh.worksheet(safe_name)
-    worksheet.append_row([
-        entry["timestamp"], entry["question_id"], entry["attempt"], entry["is_final"],
-        entry["question_text"], entry["student_answer"],
-        entry["ai_feedback_understanding_level"], entry["ai_feedback_analysis"], entry["ai_feedback_suggestion"]
-    ])
+    except Exception as e:
+        st.warning(f"데이터를 Google Sheets에 저장하는 중 오류가 발생했습니다: {e}")
 
-
-def get_ai_feedback(step, answer):
-    if len(answer.strip()) < CONFIG['MIN_ANSWER_LENGTH']:
+def get_ai_feedback(client, q_key, student_answer):
+    if len(student_answer.strip()) < CONFIG['MIN_ANSWER_LENGTH']:
         return json.dumps({
             "error": f"답변이 너무 짧아요. 자신의 생각을 조금 더 자세히 ({CONFIG['MIN_ANSWER_LENGTH']}자 이상) 설명해주시면 더 좋은 도움을 드릴 수 있어요!"
         })
 
-    step_info = QUESTIONS[step]
-    prompt = RUBRIC_PROMPT_TEMPLATE.format(
-        rubric_details=RUBRIC_DETAILS,
-        evaluation_dimension=step_info["evaluation_dimension"],
-        student_answer=answer
+    q_info = QUESTIONS[q_key]
+    dimension = q_info["dimension"]
+    criteria_key = next((key for key in SCORING_RUBRIC[dimension] if key.startswith(q_key)), q_key)
+    criteria_text = SCORING_RUBRIC[dimension].get(criteria_key, "채점 기준을 찾을 수 없습니다.")
+
+    prompt = PROMPT_TEMPLATE.format(
+        dimension=dimension,
+        question_text=q_info['text'],
+        scoring_criteria=criteria_text,
+        student_answer=student_answer
     )
     try:
         response = client.chat.completions.create(
             model=CONFIG['AI_MODEL'],
             messages=[{"role": "system", "content": prompt}],
-            temperature=0.3,
+            temperature=0.2,
             response_format={"type": "json_object"}
         )
         return response.choices[0].message.content
     except Exception as e:
         return json.dumps({"error": f"AI 서버에 문제가 발생했어요. 잠시 후 다시 시도해주세요: {e}"})
 
-# --- 4. UI 페이지 렌더링 ---
-
+# --- 4. UI 페이지 렌더링 함수들 ---
 def main_page():
     st.title("🚀 AI와 함께 탐구하는 수학과 음악")
-    st.image("https://images.unsplash.com/photo-1511379938547-c1f69419868d?q=80&w=2070&auto=format&fit=crop")
-    col1, col2 = st.columns(2)
-    if col1.button("👨‍🎓 학생으로 시작하기", use_container_width=True, type="primary"):
-        st.session_state.page = 'student_login'; st.rerun()
-    if col2.button("👩‍🏫 교사용 페이지", use_container_width=True):
-        st.session_state.page = 'teacher_login'; st.rerun()
+    st.image("https://images.unsplash.com/photo-1511379938547-c1f69419868d?q=80&w=2070&auto=format&fit=crop", caption="나만의 시그니처 사운드를 디자인해봅시다!")
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("👨‍🎓 학생으로 시작하기", use_container_width=True, type="primary"):
+            st.session_state.page = 'student_login'
+            st.rerun()
+        if st.button("👩‍🏫 교사용 페이지", use_container_width=True):
+            st.session_state.page = 'teacher_login'
+            st.rerun()
 
 def student_login_page():
     st.title("👨‍🎓 학생 로그인")
-    reset_student_session()
-    st.session_state.page = 'student_login'
-    name = st.text_input("이름을 입력하세요:")
+    name = st.text_input("이름을 입력하세요:", key="student_name_input")
     
-    col1, col2 = st.columns([0.8, 0.2])
-    if col1.button("탐구 시작하기", type="primary"):
+    if st.button("탐구 시작하기", type="primary"):
         if name:
+            initialize_session()
             st.session_state.student_name = name
             st.session_state.page = 'student_learning'
             st.rerun()
         else:
             st.warning("이름을 입력해야 탐구를 시작할 수 있어요.")
-    if col2.button("처음으로"):
+    if st.button("처음으로"):
         st.session_state.page = 'main'
         st.rerun()
-        
+
 def student_learning_page():
-    widen_space()
+    apply_custom_css()
+    q_key = QUESTION_ORDER[st.session_state.current_q_idx]
+    q_info = QUESTIONS[q_key]
+    is_finalized = st.session_state.is_finalized[q_key]
 
-    step = st.session_state.current_step
-    sub_idx = st.session_state.current_sub_question_idx
-    q_key = (step, sub_idx)
-    
-    step_info = QUESTIONS[step]
-    sub_questions = step_info["sub_questions"]
-    current_question_text = sub_questions[sub_idx]
-    is_finalized = st.session_state.is_finalized.get(q_key, False)
-
-    # --- 사이드바 네비게이션 ---
     with st.sidebar:
         st.title(f"🧭 {st.session_state.student_name}님의 탐구 지도")
-        total_questions = sum(len(q["sub_questions"]) for q in QUESTIONS.values())
-        completed_questions = len([k for k, v in st.session_state.is_finalized.items() if v])
-        st.progress(completed_questions / total_questions)
-        
-        st.markdown(f"**현재 단계: {step_info['title']}**")
+        completed_count = sum(1 for v in st.session_state.is_finalized.values() if v)
+        st.progress(completed_count / len(QUESTION_ORDER))
+        st.markdown(f"**현재 단계: {q_info['title']}**")
         
         nav_cols = st.columns(2)
-        with nav_cols[0]:
-            if st.button("⬅️ 이전 질문", use_container_width=True):
-                # (핵심 변경) 이전 질문으로 돌아가면 해당 질문을 다시 수정할 수 있도록 잠금 해제
-                prev_step, prev_sub_idx = step, sub_idx
-                if sub_idx > 1:
-                    prev_sub_idx -= 1
-                elif step > 1:
-                    prev_step -= 1
-                    prev_sub_idx = len(QUESTIONS[prev_step]["sub_questions"])
-                
-                # 돌아갈 질문의 키(key)
-                prev_q_key = (prev_step, prev_sub_idx)
-
-                # 잠금 해제
-                if prev_q_key in st.session_state.is_finalized:
-                    st.session_state.is_finalized[prev_q_key] = False
-                
-                # 페이지 이동
-                st.session_state.current_step = prev_step
-                st.session_state.current_sub_question_idx = prev_sub_idx
+        if st.session_state.current_q_idx > 0:
+            if nav_cols[0].button("⬅️ 이전 질문", use_container_width=True):
+                st.session_state.current_q_idx -= 1
                 st.rerun()
-
-        with nav_cols[1]:
+        if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
             if is_finalized:
-                if st.button("다음 질문 ➡️", use_container_width=True, type="primary"):
-                    if sub_idx < len(sub_questions):
-                        st.session_state.current_sub_question_idx += 1
-                    elif step < 3:
-                        st.session_state.current_step += 1
-                        st.session_state.current_sub_question_idx = 1
-                    else:
-                        st.session_state.page = 'completion'
+                if nav_cols[1].button("다음 질문 ➡️", use_container_width=True, type="primary"):
+                    st.session_state.current_q_idx += 1
                     st.rerun()
         
         st.markdown("---")
-        with st.expander("완료한 질문 목록 보기"):
-            for s_idx, s_info in QUESTIONS.items():
-                for q_idx in s_info["sub_questions"]:
-                    if st.session_state.is_finalized.get((s_idx, q_idx), False):
-                        st.success(f"질문 {s_idx}-{q_idx} 완료")
-
-        st.markdown("---")
         if st.button("탐구 처음부터 다시하기", use_container_width=True):
-            reset_student_session()
-            st.session_state.page = 'student_login'
-            st.rerun()
+            st.warning("정말 모든 과정을 처음부터 다시 시작하시겠습니까? 모든 기록이 사라집니다.")
+            if st.button("네, 다시 시작하겠습니다."):
+                 initialize_session()
+                 st.rerun()
 
-    # --- 메인 콘텐츠 ---
-    st.title(f"🎵 {step_info['title']}")
+    st.title(f"🎵 {TASK_INFO['TITLE']}")
+    if st.session_state.current_q_idx == 0:
+        st.markdown(TASK_INFO['DESCRIPTION'])
+        st.info(TASK_INFO['GOAL'])
     
     col1, col2 = st.columns([1.5, 1])
-
     with col1:
         st.markdown("#### ⚙️ GeoGebra 탐구 도구")
-        st.components.v1.iframe(GEOGEBRA_LINKS.get(step, GEOGEBRA_LINKS[1]), height=800, scrolling=True)
+        st.components.v1.iframe(TASK_INFO['GEOGEBRA_LINK'], height=600, scrolling=True)
 
     with col2:
-        st.markdown(f"#### 📝 **탐구 질문 {sub_idx}**")
-        st.info(current_question_text)
+        st.markdown(f"#### 📝 **탐구 질문 {q_key}**")
+        st.warning(q_info["text"])
         
         answer = st.text_area("나의 생각을 여기에 작성해보세요:", 
                               value=st.session_state.answers.get(q_key, ""),
                               height=200, 
-                              key=f"ans_{step}_{sub_idx}",
+                              key=f"ans_{q_key}",
                               disabled=is_finalized,
                               label_visibility="collapsed")
         st.session_state.answers[q_key] = answer
 
-        ready_to_submit = st.checkbox(
-            "제 답변을 다시 확인했으며, 제출할 준비가 되었습니다.",
-            key=f"check_{q_key}",
-            disabled=is_finalized
-        )
-
-        button_cols = st.columns(2)
-        with button_cols[0]:
-            if st.button("🚀 답변 제출 및 피드백 요청", use_container_width=True, disabled=is_finalized or not ready_to_submit):
-                with st.spinner("AI 도우미가 답변을 분석하고 있어요..."):
-                    feedback_str = get_ai_feedback(step, answer)
+        if not is_finalized:
+            ready_to_submit = st.checkbox("제출할 준비가 되었습니다.", key=f"check_{q_key}")
+            if st.button("🚀 AI에게 피드백 요청하기", use_container_width=True, disabled=not ready_to_submit):
+                with st.spinner("AI 코치가 답변을 분석하고 있어요..."):
+                    feedback_str = get_ai_feedback(client, q_key, answer)
                 feedback_json = json.loads(feedback_str)
                 st.session_state.feedbacks[q_key] = feedback_json
-                
                 if 'error' not in feedback_json:
-                    current_attempt = st.session_state.attempts.get(q_key, 0) + 1
-                    st.session_state.attempts[q_key] = current_attempt
-                    save_student_data(st.session_state.student_name, step, sub_idx, current_attempt, False, current_question_text, answer, feedback_json)
+                    st.session_state.attempts[q_key] += 1
+                    save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, feedback_json)
                 st.rerun()
 
-        with button_cols[1]:
-            if q_key in st.session_state.feedbacks and not is_finalized and 'error' not in st.session_state.feedbacks[q_key]:
-                if st.button("✅ 이 탐구 완료 & 다음으로", use_container_width=True, type="primary"):
-                    st.session_state.is_finalized[q_key] = True
-                    final_attempt = st.session_state.attempts.get(q_key, 1)
-                    feedback_to_save = st.session_state.feedbacks[q_key]
-                    save_student_data(st.session_state.student_name, step, sub_idx, final_attempt, True, current_question_text, answer, feedback_to_save)
-                    
-                    if sub_idx < len(sub_questions):
-                        st.session_state.current_sub_question_idx += 1
-                    elif step < 3:
-                        st.session_state.current_step += 1
-                        st.session_state.current_sub_question_idx = 1
-                    else:
-                        st.session_state.page = 'completion'
-                    st.rerun()
-
-        if q_key in st.session_state.feedbacks and not is_finalized:
+        if q_key in st.session_state.feedbacks:
             feedback = st.session_state.feedbacks[q_key]
             if "error" in feedback:
                 st.error(feedback["error"])
             else:
                 with st.container(border=True):
-                    st.markdown("#### 💡 AI 학습 도우미의 피드백")
-                    st.markdown(f"##### 🧠 **이해도 수준: {feedback.get('understanding_level', 'N/A')} / 3**")
+                    st.markdown("#### 💡 AI 학습 코치의 피드백")
+                    total_score = feedback.get('total_score', 'N/A')
+                    max_score = q_info["max_score"]
+                    st.markdown(f"##### 🎯 **획득 점수: {total_score} / {max_score} 점**")
+                    scores = feedback.get('scores', {})
+                    for item, score in scores.items():
+                        st.markdown(f"- `{item}`: **{score}점**")
+                    st.markdown("---")
                     st.info(f"**분석:** {feedback.get('analysis', '')}")
                     st.warning(f"**생각해볼 점:** {feedback.get('suggestion', '')}")
+
+        if not is_finalized and q_key in st.session_state.feedbacks and 'error' not in st.session_state.feedbacks[q_key]:
+            if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
+                st.session_state.is_finalized[q_key] = True
+                save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, st.session_state.feedbacks[q_key])
+                if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
+                    st.session_state.current_q_idx += 1
+                else:
+                    st.session_state.page = 'completion'
+                st.rerun()
     
     if is_finalized:
-        st.success("이 질문에 대한 탐구를 마쳤습니다! 사이드바의 '다음 질문' 버튼을 눌러 계속 진행해주세요.")
-
+        st.success("이 질문에 대한 탐구를 마쳤습니다! 사이드바에서 다음 질문으로 이동하거나, 모든 탐구를 마쳤다면 완료 페이지로 이동합니다.")
+        if st.session_state.current_q_idx == len(QUESTION_ORDER) - 1:
+            if st.button("결과 보러 가기"):
+                st.session_state.page = 'completion'
+                st.rerun()
 
 def completion_page():
-    widen_space()
+    apply_custom_css()
     st.balloons()
     st.title(f"🎉 {st.session_state.student_name}님, 모든 탐구를 완수했습니다! 🎉")
     st.markdown("### 수학과 음악의 아름다운 조화를 직접 만들어낸 당신은 진정한 '수학 아티스트'입니다!")
     
     st.subheader("📊 나의 역량 분석 리포트")
-    scores, dims = [], []
-    for step_num, step_data in QUESTIONS.items():
-        total_score, final_qs = 0, 0
-        for sub_q_idx in step_data["sub_questions"]:
-            if st.session_state.is_finalized.get((step_num, sub_q_idx), False):
-                feedback = st.session_state.feedbacks.get((step_num, sub_q_idx), {})
-                total_score += feedback.get("understanding_level", 0)
-                final_qs += 1
+    report_data = {}
+    for q_key, q_info in QUESTIONS.items():
+        dim = q_info['dimension']
+        if dim not in report_data:
+            report_data[dim] = {'score': 0, 'max_score': 0}
         
-        avg_score = (total_score / final_qs) if final_qs > 0 else 0
-        dim_name = step_data['evaluation_dimension'].split('(')[0].strip()
-        dims.append(dim_name)
-        scores.append(avg_score)
+        if st.session_state.is_finalized.get(q_key, False):
+            feedback = st.session_state.feedbacks.get(q_key, {})
+            report_data[dim]['score'] += int(feedback.get("total_score", 0))
+            report_data[dim]['max_score'] += q_info.get("max_score", 0)
+            
+    dims = list(report_data.keys())
+    scores = [(report_data[d]['score'] / report_data[d]['max_score']) * 100 if report_data[d]['max_score'] > 0 else 0 for d in dims]
 
-    report_df = pd.DataFrame({"역량": dims, "평균 점수": scores})
-    st.bar_chart(report_df.set_index("역량"))
+    report_df = pd.DataFrame({"역량 차원": dims, "성취도 (%)": scores})
+    st.bar_chart(report_df.set_index("역량 차원"))
+    st.markdown("---")
 
     st.subheader("📜 나의 탐구 여정 돌아보기")
-    for step, info in QUESTIONS.items():
-        with st.expander(f"**{info['title']}**"):
-            for sub_idx, q_text in info["sub_questions"].items():
-                if st.session_state.is_finalized.get((step, sub_idx), False):
-                    st.markdown(f"**질문 {step}-{sub_idx}:** {q_text}")
-                    st.info(f"**나의 최종 답변:** {st.session_state.answers.get((step, sub_idx), '')}")
-                    feedback = st.session_state.feedbacks.get((step, sub_idx), {})
-                    if feedback: st.json(feedback)
+    for q_key, q_info in QUESTIONS.items():
+        if st.session_state.is_finalized.get(q_key, False):
+            with st.expander(f"**질문 {q_key}: {q_info['title']}**"):
+                st.markdown(f"**질문 내용:** {q_info['text']}")
+                st.info(f"**나의 최종 답변:** {st.session_state.answers.get(q_key, '')}")
+                feedback = st.session_state.feedbacks.get(q_key, {})
+                if feedback: st.json(feedback)
 
-    if st.button("탐구 처음부터 다시하기"):
-        reset_student_session()
-        st.session_state.page = 'main'
+    if st.button("탐구 처음부터 다시하기", use_container_width=True):
+        initialize_session()
         st.rerun()
 
 def teacher_login_page():
-    widen_space()
+    apply_custom_css()
     st.title("👩‍🏫 교사용 페이지 로그인")
     password = st.text_input("비밀번호를 입력하세요:", type="password")
     
-    col1, col2 = st.columns([0.8, 0.2])
-    if col1.button("로그인", type="primary"):
-        if password == CONFIG['TEACHER_PASSWORD']:
+    if st.button("로그인", type="primary"):
+        if password == CONFIG["TEACHER_PASSWORD"]:
             st.session_state.teacher_logged_in = True
             st.session_state.page = 'teacher_dashboard'
             st.rerun()
         else:
             st.error("비밀번호가 일치하지 않습니다.")
-    if col2.button("처음으로"):
+    if st.button("처음으로"):
         st.session_state.page = 'main'
         st.rerun()
 
 def teacher_dashboard_page():
-    widen_space()
+    apply_custom_css()
     st.title("📊 교사용 대시보드")
-    if st.button("새로고침"): st.rerun()
-    data_dir = CONFIG['STUDENT_DATA_DIR']
-    if not os.path.exists(data_dir) or not os.listdir(data_dir):
+    
+    try:
+        # conn 객체에서 gspread 클라이언트를 꺼내 시트 목록을 가져옵니다.
+        sh = conn.client.open(CONFIG["GSHEET_NAME"])
+        student_names = sorted([w.title for w in sh.worksheets()])
+    except Exception as e:
+        st.error(f"학생 목록을 불러오는 중 오류 발생: {e}")
+        student_names = []
+
+    if not student_names:
         st.info("아직 제출된 학생 데이터가 없습니다.")
-        return
+    else:
+        selected_name = st.selectbox("학생 선택:", student_names, key="teacher_student_select")
+        
+        if selected_name:
+            try:
+                # conn.read()로 데이터를 편리하게 읽어옵니다.
+                df = conn.read(worksheet=selected_name, ttl=60)
+                st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
+                st.dataframe(df)
 
-    student_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".json")])
-    student_names = [f.replace(".json", "") for f in student_files]
-    selected_name = st.selectbox("학생 선택:", student_names)
-
-    if selected_name:
-        filepath = os.path.join(data_dir, f"{selected_name}.json")
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
-            
-            st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
-            for record in reversed(data):
-                final_badge = "✅ 최종" if record.get('is_final') else "🔄️ 시도"
-                with st.expander(f"**{record['timestamp']} - 질문 {record['question_id']} ({final_badge} {record['attempt']}차)**"):
-                    st.markdown("#### 질문 내용")
-                    st.warning(record['question_text'])
-                    st.markdown("#### 학생 답변")
-                    st.info(record['student_answer'])
-                    st.markdown("#### AI 피드백")
-                    feedback = record.get('ai_feedback', {})
-                    if isinstance(feedback, dict):
-                        st.markdown(f"> **이해도:** {feedback.get('understanding_level')}/3 | **분석:** {feedback.get('analysis')} | **제안:** {feedback.get('suggestion')}")
-                    else:
-                        st.json(feedback)
-        except Exception as e:
-            st.error(f"데이터 파일을 읽는 중 오류가 발생했습니다: {e}")
-
-    if st.button("로그아웃"):
+            except Exception as e:
+                st.error(f"{selected_name} 학생의 데이터를 불러오는 중 오류가 발생했습니다: {e}")
+                
+    if st.sidebar.button("로그아웃"):
         st.session_state.teacher_logged_in = False
         st.session_state.page = 'main'
         st.rerun()
 
-
 # --- 5. 메인 페이지 라우터 ---
 if 'page' not in st.session_state:
-    initialize_session_state()
+    initialize_session()
 
 page_map = {
     'main': main_page,
@@ -477,7 +410,7 @@ page_map = {
     'teacher_dashboard': teacher_dashboard_page,
 }
 
-if st.session_state.page == 'teacher_dashboard' and not st.session_state.teacher_logged_in:
+if st.session_state.page == 'teacher_dashboard' and not st.session_state.get('teacher_logged_in', False):
     st.session_state.page = 'teacher_login'
 
 page_map.get(st.session_state.page, main_page)()

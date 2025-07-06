@@ -1,5 +1,7 @@
+# requirements.txt
 streamlit
 openai
-pandas  # 만약 pandas도 사용한다면 추가
-numpy   # 만약 numpy도 사용한다면 추가
+pandas
 gspread
+google-auth-oauthlib
+st-gsheets-connection  # <-- 이것이 올바른 이름입니다!
