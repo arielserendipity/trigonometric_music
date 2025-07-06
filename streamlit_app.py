@@ -16,6 +16,25 @@ CONFIG = {
 # 페이지 넓게 사용 설정
 st.set_page_config(layout="wide")
 
+import gspread
+
+gsheet_secret = st.secrets["connections"]["gsheets"]
+gc = gspread.service_account_from_dict({
+    "type": "service_account",
+    "project_id": gsheet_secret["project_id"],
+    "private_key_id": gsheet_secret["private_key_id"],
+    "private_key": gsheet_secret["private_key"],
+    "client_email": gsheet_secret["client_email"],
+    "client_id": gsheet_secret["client_id"],
+    "auth_uri": gsheet_secret["auth_uri"],
+    "token_uri": gsheet_secret["token_uri"],
+    "auth_provider_x509_cert_url": gsheet_secret["auth_provider_x509_cert_url"],
+    "client_x509_cert_url": gsheet_secret["client_x509_cert_url"],
+    "universe_domain": gsheet_secret["universe_domain"],
+})
+
+sh = gc.open("수학과 음악")
+
 # 가로 폭을 최대로 늘리기 위한 CSS 주입 함수
 def widen_space():
     st.markdown("""
@@ -123,18 +142,36 @@ def save_student_data(student_name, step, sub_idx, attempt, is_final, question, 
     data_dir = CONFIG['STUDENT_DATA_DIR']
     if not os.path.exists(data_dir): os.makedirs(data_dir)
     safe_name = "".join(c for c in student_name if c.isalnum())
-    filename = os.path.join(data_dir, f"{safe_name}.json")
+    # filename = os.path.join(data_dir, f"{safe_name}.json")
     
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "question_id": f"{step}-{sub_idx}", "attempt": attempt, "is_final": is_final,
-        "question_text": question, "student_answer": answer, "ai_feedback": feedback
+        "question_text": question, "student_answer": answer, "ai_feedback_understanding_level": feedback["understanding_level"],
+        "ai_feedback_analysis": feedback["analysis"], "ai_feedback_suggestion": feedback["suggestion"]
     }
-    try:
-        with open(filename, "r", encoding="utf-8") as f: data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError): data = []
-    data.append(entry)
-    with open(filename, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
+    # try:
+    #     with open(filename, "r", encoding="utf-8") as f: data = json.load(f)
+    # except (FileNotFoundError, json.JSONDecodeError): data = []
+    # data.append(entry)
+    # with open(filename, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
+
+    if student_name not in [t.title for t in sh.worksheets()]:
+        sh.add_worksheet(title=safe_name, rows="2000", cols="50")
+        worksheet = sh.worksheet(safe_name)
+        worksheet.append_row([
+            "Timestamp", "Question ID", "Attempt", "Is Final",
+            "Question Text", "Student Answer",
+            "AI Feedback Understanding Level", "AI Feedback Analysis", "AI Feedback Suggestion"
+        ])
+    
+    worksheet = sh.worksheet(safe_name)
+    worksheet.append_row([
+        entry["timestamp"], entry["question_id"], entry["attempt"], entry["is_final"],
+        entry["question_text"], entry["student_answer"],
+        entry["ai_feedback_understanding_level"], entry["ai_feedback_analysis"], entry["ai_feedback_suggestion"]
+    ])
+
 
 def get_ai_feedback(step, answer):
     if len(answer.strip()) < CONFIG['MIN_ANSWER_LENGTH']:
