@@ -5,8 +5,8 @@ import json
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
-import os  # <--- [수정] os 모듈 import 추가
-from PIL import Image  # <--- [수정] Image 모듈 import 추가
+import os
+from PIL import Image
 
 # --- 1. 기본 설정 및 환경 구성 ---
 st.set_page_config(layout="wide", page_title="수학과 음악 연결 탐구")
@@ -54,7 +54,7 @@ client = get_openai_client()
 gc = get_gspread_client()
 
 # --- 2. 과제 및 프레임워크 데이터 정의 ---
-# (이하 데이터 정의 부분은 수정 없음)
+# (TASK_INFO, QUESTIONS, SCORING_RUBRIC, PROMPT_TEMPLATE 등은 이전과 동일)
 TASK_INFO = {
     "TITLE": "나만의 '시그니처 사운드' 만들기",
     "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
@@ -130,7 +130,6 @@ PROMPT_TEMPLATE = """
 """
 
 # --- 3. 세션 상태 및 헬퍼 함수 ---
-# (이하 모든 함수와 UI 코드는 이전과 동일하므로 생략하지 않고 전체 코드를 제공합니다)
 CONFIG = {
     "TEACHER_PASSWORD": "2025",
     "AI_MODEL": "gpt-4-turbo",
@@ -286,7 +285,8 @@ def student_learning_page():
                 st.session_state.uploaded_images[q_key] = uploaded_image
 
         if not is_finalized:
-            if st.button("🚀 AI 코치에게 피드백 요청하기", use_container_width=True):
+            # [수정] 버튼 텍스트 변경
+            if st.button("🚀 답변 제출하고 피드백 받기", use_container_width=True):
                 image_path = ""
                 if st.session_state.uploaded_images.get(q_key):
                     img_file = st.session_state.uploaded_images[q_key]
@@ -308,25 +308,35 @@ def student_learning_page():
                     save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, image_path, feedback_json)
                 st.rerun()
 
+        # [수정] 피드백 표시 및 최종 제출 버튼 로직
         if q_key in st.session_state.feedbacks and st.session_state.feedbacks[q_key]:
             feedback = st.session_state.feedbacks[q_key]
             
             if "error" in feedback:
                 st.error(feedback["error"])
             else:
+                # 피드백 컨테이너
                 with st.container(border=True):
                     st.markdown("#### 💡 AI 학습 코치의 피드백")
                     st.info(f"**생각해볼 점:** {feedback.get('analysis', '')}")
                     st.warning(f"**도움 질문:** {feedback.get('suggestion', '')}")
+                
+                # [핵심 수정] 최종 제출 버튼을 피드백 컨테이너 바깥으로 이동하여 항상 보이도록 함
+                if not is_finalized:
+                    total_score = int(feedback.get("total_score", 0))
+                    max_score = q_info["max_score"]
 
-                total_score = int(feedback.get("total_score", 0))
-                max_score = q_info["max_score"]
-
-                if total_score >= max_score and not is_finalized:
-                    st.success("훌륭해요! 질문의 핵심을 잘 파악했네요. 아래 버튼을 눌러 최종 제출하거나, 생각을 더 발전시켜 다시 피드백을 받을 수도 있어요.")
+                    # 점수에 따라 다른 안내 메시지 표시
+                    if total_score >= max_score:
+                        st.success("훌륭해요! 질문의 핵심을 잘 파악했네요. 아래 버튼을 눌러 최종 제출할 수 있습니다.")
+                    else:
+                        st.info("AI 코치의 도움을 받아 답변을 수정하고 다시 피드백을 받거나, 현재 답변으로 최종 제출할 수 있습니다.")
+                    
+                    # 최종 제출 버튼
                     if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
                         st.session_state.is_finalized[q_key] = True
                         image_path = st.session_state.image_paths.get(q_key, "")
+                        # 마지막 답변과 피드백으로 최종 저장
                         save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, image_path, feedback)
                         
                         if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
@@ -334,8 +344,6 @@ def student_learning_page():
                         else:
                             st.session_state.page = 'completion'
                         st.rerun()
-                elif not is_finalized:
-                    st.info("AI 코치의 도움 질문을 보고, 생각을 수정해서 다시 피드백을 요청해주세요!")
 
     if is_finalized:
         st.success("이 질문에 대한 탐구를 마쳤습니다! 사이드바에서 다른 질문으로 이동하거나, 모든 질문을 마쳤다면 완료 페이지로 이동하세요.")
