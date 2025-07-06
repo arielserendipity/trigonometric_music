@@ -3,8 +3,10 @@ import pandas as pd
 from openai import OpenAI
 import json
 from datetime import datetime
-import gspread # conn.client를 통해 얻은 객체를 사용하기 위해 여전히 필요합니다.
-# [최종 수정] 불필요하고 충돌을 일으키는 Credentials import를 완전히 삭제했습니다.
+import gspread
+from google.oauth2.service_account import Credentials
+import os  # <--- [수정] os 모듈 import 추가
+from PIL import Image  # <--- [수정] Image 모듈 import 추가
 
 # --- 1. 기본 설정 및 환경 구성 ---
 st.set_page_config(layout="wide", page_title="수학과 음악 연결 탐구")
@@ -25,7 +27,6 @@ def apply_custom_css():
 @st.cache_resource
 def get_openai_client():
     try:
-        # openai_api_key는 secrets.toml에 그대로 두거나, Streamlit Cloud Secrets에 추가합니다.
         return OpenAI(api_key=st.secrets["openai_api_key"])
     except KeyError:
         st.error("OpenAI API 키가 secrets에 설정되지 않았습니다.")
@@ -34,23 +35,26 @@ def get_openai_client():
         st.error(f"OpenAI 클라이언트 생성 중 오류 발생: {e}")
         st.stop()
 
-# [최종 수정] 연결 함수를 단 하나로 통합했습니다.
-# 이 함수 하나로 읽기와 쓰기 모두를 처리할 수 있습니다.
 @st.cache_resource
 def get_gspread_client():
     try:
-        # 이 함수는 secrets.toml의 [connections.gsheets] 설정을 자동으로 읽어옵니다.
-        # type 필드가 없으면 st-gsheets-connection 라이브러리가 올바르게 처리합니다.
-        return st.connection("gsheets")
+        creds = Credentials.from_service_account_info(
+            st.secrets["google_sheets_auth"],
+            scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        )
+        return gspread.authorize(creds)
+    except KeyError:
+        st.error("Google Sheets 인증 정보([google_sheets_auth])가 secrets에 설정되지 않았습니다.")
+        st.stop()
     except Exception as e:
         st.error(f"Google Sheets 인증에 실패했습니다: {e}")
         st.stop()
 
 client = get_openai_client()
-conn = get_gsheet_connection() # conn 객체 하나만 사용합니다.
+gc = get_gspread_client()
 
-# --- 2. 과제 및 프레임워크 데이터 정의 (이하 수정 없음) ---
-# ... (이전과 동일한 내용) ...
+# --- 2. 과제 및 프레임워크 데이터 정의 ---
+# (이하 데이터 정의 부분은 수정 없음)
 TASK_INFO = {
     "TITLE": "나만의 '시그니처 사운드' 만들기",
     "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
@@ -126,6 +130,7 @@ PROMPT_TEMPLATE = """
 """
 
 # --- 3. 세션 상태 및 헬퍼 함수 ---
+# (이하 모든 함수와 UI 코드는 이전과 동일하므로 생략하지 않고 전체 코드를 제공합니다)
 CONFIG = {
     "TEACHER_PASSWORD": "2025",
     "AI_MODEL": "gpt-4-turbo",
@@ -142,9 +147,15 @@ def initialize_session():
     st.session_state.feedbacks = {key: {} for key in QUESTION_ORDER}
     st.session_state.attempts = {key: 0 for key in QUESTION_ORDER}
     st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
+    st.session_state.uploaded_images = {key: None for key in QUESTION_ORDER}
+    st.session_state.image_paths = {key: "" for key in QUESTION_ORDER}
 
-# [최종 수정] 함수가 connection 객체를 직접 받아서, 내부의 .client를 사용합니다.
-def save_to_gsheet(connection, student_name, question_id, attempt, is_final, question_text, answer, feedback):
+def reset_for_new_student(name):
+    initialize_session()
+    st.session_state.student_name = name
+    st.session_state.page = 'student_learning'
+
+def save_to_gsheet(gspread_client, student_name, question_id, attempt, is_final, question_text, answer, image_path, feedback):
     try:
         sh = gspread_client.open(CONFIG["GSHEET_NAME"])
         safe_name = "".join(c for c in student_name if c.isalnum() or c in " _-")
@@ -275,7 +286,6 @@ def student_learning_page():
                 st.session_state.uploaded_images[q_key] = uploaded_image
 
         if not is_finalized:
-            # [수정] 피드백 요청 버튼과 최종 제출 버튼 로직 분리
             if st.button("🚀 AI 코치에게 피드백 요청하기", use_container_width=True):
                 image_path = ""
                 if st.session_state.uploaded_images.get(q_key):
@@ -283,7 +293,7 @@ def student_learning_page():
                     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                     safe_student_name = "".join(c for c in st.session_state.student_name if c.isalnum())
                     image_path = os.path.join("image_uploads", f"{safe_student_name}_{q_key}_{timestamp}.png")
-                    st.session_state.image_paths[q_key] = image_path # 경로를 세션에 저장
+                    st.session_state.image_paths[q_key] = image_path
                     
                     with Image.open(img_file) as img:
                         img.save(image_path, "PNG")
@@ -295,7 +305,7 @@ def student_learning_page():
                 st.session_state.feedbacks[q_key] = feedback_json
                 if 'error' not in feedback_json:
                     st.session_state.attempts[q_key] += 1
-                    save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, feedback_json)
+                    save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, image_path, feedback_json)
                 st.rerun()
 
         if q_key in st.session_state.feedbacks and st.session_state.feedbacks[q_key]:
@@ -306,26 +316,27 @@ def student_learning_page():
             else:
                 with st.container(border=True):
                     st.markdown("#### 💡 AI 학습 코치의 피드백")
-                    total_score = feedback.get('total_score', 'N/A')
-                    max_score = q_info["max_score"]
-                    st.markdown(f"##### 🎯 **획득 점수: {total_score} / {max_score} 점**")
-                    scores = feedback.get('scores', {})
-                    for item, score in scores.items():
-                        st.markdown(f"- `{item}`: **{score}점**")
-                    st.markdown("---")
-                    st.info(f"**분석:** {feedback.get('analysis', '')}")
-                    st.warning(f"**생각해볼 점:** {feedback.get('suggestion', '')}")
+                    st.info(f"**생각해볼 점:** {feedback.get('analysis', '')}")
+                    st.warning(f"**도움 질문:** {feedback.get('suggestion', '')}")
 
-        if not is_finalized and q_key in st.session_state.feedbacks and 'error' not in st.session_state.feedbacks[q_key]:
-            if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
-                st.session_state.is_finalized[q_key] = True
-                save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, st.session_state.feedbacks[q_key])
-                if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
-                    st.session_state.current_q_idx += 1
-                else:
-                    st.session_state.page = 'completion'
-                st.rerun()
-    
+                total_score = int(feedback.get("total_score", 0))
+                max_score = q_info["max_score"]
+
+                if total_score >= max_score and not is_finalized:
+                    st.success("훌륭해요! 질문의 핵심을 잘 파악했네요. 아래 버튼을 눌러 최종 제출하거나, 생각을 더 발전시켜 다시 피드백을 받을 수도 있어요.")
+                    if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
+                        st.session_state.is_finalized[q_key] = True
+                        image_path = st.session_state.image_paths.get(q_key, "")
+                        save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, image_path, feedback)
+                        
+                        if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
+                            st.session_state.current_q_idx += 1
+                        else:
+                            st.session_state.page = 'completion'
+                        st.rerun()
+                elif not is_finalized:
+                    st.info("AI 코치의 도움 질문을 보고, 생각을 수정해서 다시 피드백을 요청해주세요!")
+
     if is_finalized:
         st.success("이 질문에 대한 탐구를 마쳤습니다! 사이드바에서 다른 질문으로 이동하거나, 모든 질문을 마쳤다면 완료 페이지로 이동하세요.")
         if all(st.session_state.is_finalized.values()):
@@ -394,9 +405,8 @@ def teacher_dashboard_page():
     st.title("📊 교사용 대시보드")
     
     try:
-        # conn 객체에서 gspread 클라이언트를 꺼내 시트 목록을 가져옵니다.
-        sh = conn.client.open(CONFIG["GSHEET_NAME"])
-        student_names = sorted([w.title for w in sh.worksheets()])
+        sh = gc.open(CONFIG["GSHEET_NAME"])
+        student_names = sorted([w.title for w in sh.worksheets() if w.title != 'Sheet1'])
     except Exception as e:
         st.error(f"학생 목록을 불러오는 중 오류 발생: {e}")
         student_names = []
@@ -408,10 +418,12 @@ def teacher_dashboard_page():
         selected_name = st.selectbox("학생 선택:", student_names, key="teacher_student_select")
         if selected_name:
             try:
-                # conn.read()로 데이터를 편리하게 읽어옵니다.
-                df = conn.read(worksheet=selected_name, ttl=60)
-                st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
-                st.dataframe(df)
+                worksheet = sh.worksheet(selected_name)
+                data = worksheet.get_all_records()
+                if data:
+                    df = pd.DataFrame(data)
+                    st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
+                    st.dataframe(df)
 
                     if 'Image Path' in df.columns:
                         image_paths = df[df['Image Path'].notna() & (df['Image Path'] != '')]['Image Path'].unique().tolist()
