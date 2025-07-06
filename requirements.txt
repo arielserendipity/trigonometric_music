@@ -4,4 +4,3 @@ openai
 pandas
 gspread
 google-auth-oauthlib
-st-gsheets-connection  # <-- 이것이 올바른 이름입니다!

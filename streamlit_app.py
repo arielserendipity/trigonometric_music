@@ -3,8 +3,8 @@ import pandas as pd
 from openai import OpenAI
 import json
 from datetime import datetime
-import gspread # conn.client를 통해 얻은 객체를 사용하기 위해 여전히 필요합니다.
-# [최종 수정] 불필요하고 충돌을 일으키는 Credentials import를 완전히 삭제했습니다.
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- 1. 기본 설정 및 환경 구성 ---
 st.set_page_config(layout="wide", page_title="수학과 음악 연결 탐구")
@@ -22,29 +22,37 @@ def apply_custom_css():
 @st.cache_resource
 def get_openai_client():
     try:
+        # openai_api_key는 secrets.toml에 그대로 두거나, Streamlit Cloud Secrets에 추가합니다.
         return OpenAI(api_key=st.secrets["openai_api_key"])
-    except Exception:
-        st.error("OpenAI API 키 설정에 문제가 있습니다. .streamlit/secrets.toml 파일을 확인해주세요.")
+    except KeyError:
+        st.error("OpenAI API 키가 secrets에 설정되지 않았습니다.")
+        st.stop()
+    except Exception as e:
+        st.error(f"OpenAI 클라이언트 생성 중 오류 발생: {e}")
         st.stop()
 
-# [최종 수정] 연결 함수를 단 하나로 통합했습니다.
-# 이 함수 하나로 읽기와 쓰기 모두를 처리할 수 있습니다.
+# [궁극의 최종 수정] 가장 기본적이고 안정적인 gspread 인증 함수
 @st.cache_resource
-def get_gsheet_connection():
+def get_gspread_client():
     try:
-        # 이 함수는 secrets.toml의 [connections.gsheets] 설정을 자동으로 읽어옵니다.
-        # type 필드가 없으면 st-gsheets-connection 라이브러리가 올바르게 처리합니다.
-        return st.connection("gsheets")
+        # 우리가 새로 정의한 [google_sheets_auth] 섹션을 명시적으로 사용합니다.
+        creds = Credentials.from_service_account_info(
+            st.secrets["google_sheets_auth"],
+            scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        )
+        return gspread.authorize(creds)
+    except KeyError:
+        st.error("Google Sheets 인증 정보([google_sheets_auth])가 secrets에 설정되지 않았습니다.")
+        st.stop()
     except Exception as e:
-        st.error(f"Google Sheets 연결에 실패했습니다: {e}")
+        st.error(f"Google Sheets 인증에 실패했습니다: {e}")
         st.stop()
 
 # 클라이언트 초기화
 client = get_openai_client()
-conn = get_gsheet_connection() # conn 객체 하나만 사용합니다.
+gc = get_gspread_client() # gc (gspread client) 하나만 사용합니다.
 
 # --- 2. 과제 및 프레임워크 데이터 정의 (이하 수정 없음) ---
-# ... (이전과 동일한 내용) ...
 TASK_INFO = {
     "TITLE": "나만의 '시그니처 사운드' 만들기",
     "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
@@ -111,6 +119,7 @@ PROMPT_TEMPLATE = """
   "suggestion": "(더 높은 점수를 받기 위해 보완할 점이나, '만약 ~라면 어떨까?'와 같이 더 깊이 생각해볼 만한 질문을 구체적으로 제시)"
 }}
 """
+
 # --- 3. 세션 상태 및 헬퍼 함수 ---
 CONFIG = {
     "TEACHER_PASSWORD": "2025",
@@ -130,11 +139,8 @@ def initialize_session():
     st.session_state.attempts = {key: 0 for key in QUESTION_ORDER}
     st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
 
-# [최종 수정] 함수가 connection 객체를 직접 받아서, 내부의 .client를 사용합니다.
-def save_to_gsheet(connection, student_name, question_id, attempt, is_final, question_text, answer, feedback):
+def save_to_gsheet(gspread_client, student_name, question_id, attempt, is_final, question_text, answer, feedback):
     try:
-        # conn 객체에서 gspread 클라이언트를 바로 꺼내 씁니다.
-        gspread_client = connection.client
         sh = gspread_client.open(CONFIG["GSHEET_NAME"])
         safe_name = "".join(c for c in student_name if c.isalnum())
         try:
@@ -274,7 +280,7 @@ def student_learning_page():
                 st.session_state.feedbacks[q_key] = feedback_json
                 if 'error' not in feedback_json:
                     st.session_state.attempts[q_key] += 1
-                    save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, feedback_json)
+                    save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], False, q_info['text'], answer, feedback_json)
                 st.rerun()
 
         if q_key in st.session_state.feedbacks:
@@ -297,7 +303,7 @@ def student_learning_page():
         if not is_finalized and q_key in st.session_state.feedbacks and 'error' not in st.session_state.feedbacks[q_key]:
             if st.button("✅ 이 질문 완료 & 다음으로", use_container_width=True, type="primary"):
                 st.session_state.is_finalized[q_key] = True
-                save_to_gsheet(conn, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, st.session_state.feedbacks[q_key])
+                save_to_gsheet(gc, st.session_state.student_name, q_key, st.session_state.attempts[q_key], True, q_info['text'], answer, st.session_state.feedbacks[q_key])
                 if st.session_state.current_q_idx < len(QUESTION_ORDER) - 1:
                     st.session_state.current_q_idx += 1
                 else:
@@ -370,8 +376,7 @@ def teacher_dashboard_page():
     st.title("📊 교사용 대시보드")
     
     try:
-        # conn 객체에서 gspread 클라이언트를 꺼내 시트 목록을 가져옵니다.
-        sh = conn.client.open(CONFIG["GSHEET_NAME"])
+        sh = gc.open(CONFIG["GSHEET_NAME"])
         student_names = sorted([w.title for w in sh.worksheets()])
     except Exception as e:
         st.error(f"학생 목록을 불러오는 중 오류 발생: {e}")
@@ -384,8 +389,10 @@ def teacher_dashboard_page():
         
         if selected_name:
             try:
-                # conn.read()로 데이터를 편리하게 읽어옵니다.
-                df = conn.read(worksheet=selected_name, ttl=60)
+                worksheet = gc.open(CONFIG["GSHEET_NAME"]).worksheet(selected_name)
+                data = worksheet.get_all_records()
+                df = pd.DataFrame(data)
+                
                 st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
                 st.dataframe(df)
 
