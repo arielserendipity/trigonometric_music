@@ -56,6 +56,7 @@ client = get_openai_client()
 gc = get_gspread_client()
 
 # --- 2. 과제 및 프레임워크 데이터 정의 ---
+# (이전 코드와 동일하므로 생략)
 TASK_INFO = {
     "TITLE": "나만의 '시그니처 사운드' 만들기",
     "DESCRIPTION": "요즘 많은 크리에이터들이 영상 중간 부분에 자신만의 독특한 효과음, 즉 '시그니처 사운드'를 사용합니다. 우리도 GeoGebra와 삼각함수 `y = A*sin(Bx+C) + D`를 이용해서 세상에 하나뿐인 나만의 시그니처 사운드를 디자인해 봅시다!",
@@ -69,7 +70,7 @@ TASK_INFO = {
 
 QUESTIONS = {
     "1-1": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "목표 소리의 세 가지 특징을 수학적으로 표현하기 위해 각각 어떤 변수(A, B, C, D)를 사용해야 할지 연결하고 이유를 설명하세요.", "dimension": "다른 표상", "max_score": 1},
-    "1-2": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "여러분이 디자인한 최종 시그니처 사운드를 나타내는 함수식을 서술하고, GeoGebra로 만든 그래프를 캡처하여 첨부해주세요.", "dimension": "다른 표상", "max_score": 1, "has_image_upload": True},
+    "1-2": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "여러분이 디자인한 최종 시그니처 사운드를 나타내는 함수식을 서술하고, 해당 식의 GeoGebra 그래프를 캡처하여 첨부해주세요.", "dimension": "다른 표상", "max_score": 1, "has_image_upload": True},
     "1-3": {"step": 1, "title": "Step 1. 소리와 수학 연결하기", "text": "완성한 수학식에서 각각의 변수(A, B, C, D)와 그 결과값은 현실 세계의 '소리'에서 구체적으로 무엇을 의미할까요?", "dimension": "다른 표상", "max_score": 1},
     "2-1": {"step": 2, "title": "Step 2. 나만의 사운드 만들기", "text": "'사운드 디자인 목표'를 달성하기 위해 각각의 변수(A, B, C, D)의 값을 어떻게 정했나요? 값을 정한 이유와 계산 과정을 상세히 서술해주세요.", "dimension": "절차", "max_score": 2},
     "2-2": {"step": 2, "title": "Step 2. 나만의 사운드 만들기", "text": "만약 사운드 디자인의 목표가 바뀌면 변수(A, B, C, D)들을 어떻게 변형하면 좋을지 구체적으로 서술해주세요. 즉, 수학적 조작이 음악적 결과에 어떤 영향을 미치는지 관계와 그 근거를 구체적으로 서술해주세요.", "dimension": "함의", "max_score": 2},
@@ -176,6 +177,7 @@ def initialize_session():
     st.session_state.is_finalized = {key: False for key in QUESTION_ORDER}
     st.session_state.uploaded_images = {key: None for key in QUESTION_ORDER}
     st.session_state.image_paths = {key: "" for key in QUESTION_ORDER}
+    st.session_state.feedback_submitted = False ## 변경/추가된 부분 ##
 
 def reset_for_new_student(name):
     initialize_session()
@@ -205,6 +207,28 @@ def save_to_gsheet(gspread_client, student_name, question_id, attempt, is_final,
         ], value_input_option='USER_ENTERED')
     except Exception as e:
         st.warning(f"데이터를 Google Sheets에 저장하는 중 오류가 발생했습니다: {e}")
+
+## 변경/추가된 부분: 최종 피드백 저장 함수 ##
+def save_final_feedback_to_gsheet(gspread_client, student_name, rating, good_points, bad_points):
+    try:
+        sh = gspread_client.open(CONFIG["GSHEET_NAME"])
+        safe_name = "".join(c for c in student_name if c.isalnum() or c in " _-")
+        worksheet = sh.worksheet(safe_name)
+
+        feedback_answer = f"별점: {rating}\n\n좋았던 점:\n{good_points}\n\n아쉬웠던 점:\n{bad_points}"
+
+        worksheet.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Final_Feedback",  # Question ID
+            1,                 # Attempt
+            True,              # Is Final
+            "수업 만족도 및 피드백", # Question Text
+            feedback_answer,   # Student Answer
+            "", "", "", ""     # Image, Scores, Total Score, Feedback (empty)
+        ], value_input_option='USER_ENTERED')
+    except Exception as e:
+        st.warning(f"최종 피드백을 Google Sheets에 저장하는 중 오류가 발생했습니다: {e}")
+
 
 def get_ai_feedback(client, q_key, student_answer):
     if len(student_answer.strip()) < CONFIG['MIN_ANSWER_LENGTH']:
@@ -384,12 +408,42 @@ def student_learning_page():
                 st.session_state.page = 'completion'
                 st.rerun()
 
+## 변경/추가된 부분: completion_page 전체 수정 ##
 def completion_page():
     apply_custom_css()
-    st.balloons()
-    st.title(f"🎉 {st.session_state.student_name}님, 모든 탐구를 완수했습니다! 🎉")
+    st.title(f"🎉 {st.session_state.student_name}님, 모든 탐구를 완수했습니다!")
     st.markdown("### 수학과 음악의 아름다운 조화를 직접 만들어낸 당신은 진정한 '수학 아티스트'입니다!")
+    st.balloons()
     
+    st.markdown("---")
+    st.subheader("🙋‍♀️ AI 코치와 함께한 수업은 어땠나요?")
+    st.markdown("여러분의 소중한 의견은 더 좋은 수업을 만드는 데 큰 도움이 됩니다.")
+
+    rating_options = {
+        "⭐ (1점)": 1, "⭐⭐ (2점)": 2, "⭐⭐⭐ (3점)": 3, 
+        "⭐⭐⭐⭐ (4점)": 4, "⭐⭐⭐⭐⭐ (5점)": 5
+    }
+    rating_label = st.radio(
+        "오늘 수업의 전반적인 만족도를 별점으로 평가해주세요.",
+        options=rating_options.keys(),
+        horizontal=True
+    )
+    rating_value = rating_options[rating_label] if rating_label else 0
+
+    good_points = st.text_area("👍 좋았던 점을 알려주세요.", height=100)
+    bad_points = st.text_area("🤔 아쉬웠던 점이나 개선할 점이 있다면 알려주세요.", height=100)
+
+    if st.button("만족도 제출하기", type="primary", use_container_width=True):
+        if not good_points or not bad_points:
+            st.warning("좋았던 점과 아쉬웠던 점을 모두 작성해주세요.")
+        else:
+            with st.spinner("만족도 내용을 저장하고 있어요..."):
+                save_final_feedback_to_gsheet(gc, st.session_state.student_name, f"{rating_value}점", good_points, bad_points)
+                st.session_state.feedback_submitted = True
+                st.success("소중한 의견 감사합니다! 이제 최종 리포트를 확인하세요.")
+                st.rerun()
+
+    # 피드백이 제출된 후, 결과 리포트를 보여줌
     st.subheader("📊 나의 역량 분석 리포트")
     report_data = {}
     for q_key, q_info in QUESTIONS.items():
@@ -440,13 +494,17 @@ def teacher_login_page():
         st.session_state.page = 'main'
         st.rerun()
 
+## 변경/추가된 부분: teacher_dashboard_page 수정 ##
 def teacher_dashboard_page():
     apply_custom_css()
     st.title("📊 교사용 대시보드")
     
     try:
         sh = gc.open(CONFIG["GSHEET_NAME"])
-        student_names = sorted([w.title for w in sh.worksheets() if w.title != 'Sheet1'])
+        # 'Sheet1' 같은 기본 시트를 제외하고 학생 이름만 가져옴
+        student_sheets = [w for w in sh.worksheets() if w.title not in ['Sheet1', '기본시트']]
+        student_names = sorted([w.title for w in student_sheets])
+
     except Exception as e:
         st.error(f"학생 목록을 불러오는 중 오류 발생: {e}")
         student_names = []
@@ -462,9 +520,21 @@ def teacher_dashboard_page():
                 data = worksheet.get_all_records()
                 if data:
                     df = pd.DataFrame(data)
-                    st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
-                    st.dataframe(df)
+                    
+                    # 최종 피드백 데이터 분리 및 표시
+                    final_feedback_df = df[df['Question ID'] == 'Final_Feedback']
+                    if not final_feedback_df.empty:
+                        st.subheader(f"🗣️ {selected_name} 학생의 최종 수업 피드백")
+                        feedback_content = final_feedback_df.iloc[0]['Student Answer']
+                        st.info(feedback_content)
+                        st.markdown("---")
 
+                    # 학습 과정 데이터 표시 (최종 피드백 제외)
+                    learning_df = df[df['Question ID'] != 'Final_Feedback']
+                    st.subheader(f"🔍 {selected_name} 학생의 학습 과정 추적")
+                    st.dataframe(learning_df)
+
+                    # 이미지 표시
                     if 'Image Path' in df.columns:
                         image_paths = df[df['Image Path'].notna() & (df['Image Path'] != '')]['Image Path'].unique().tolist()
                         if image_paths:
